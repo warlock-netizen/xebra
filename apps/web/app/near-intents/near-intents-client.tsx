@@ -21,6 +21,7 @@ import { useWallets } from "../../components/wallet/wallet-provider";
 import { env } from "../../lib/env";
 import { ensureChain, readChainId, sendTransaction, waitForReceipt } from "../../lib/evm-rpc";
 import { reportError } from "../../lib/format-error";
+import { type ClassifiedError, classifyWalletError } from "../../lib/wallet-error";
 
 /**
  * USDC from a chain NEAR Intents does not reach into anything Intents delivers, with Xebra carrying
@@ -186,7 +187,7 @@ export function NearIntentsClient() {
   const [step, setStep] = useState<"idle" | "preparing" | "signing" | "burning" | "submitting">(
     "idle",
   );
-  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<ClassifiedError | null>(null);
   const [tracked, setTracked] = useState<Tracked | null>(null);
 
   useEffect(() => {
@@ -234,11 +235,14 @@ export function NearIntentsClient() {
   const cancel = useCallback(() => {
     attempt.current += 1;
     setStep("idle");
-    setSendError(
-      isStellar
+    setSendError({
+      kind: "declined",
+      message: isStellar
         ? "Cancelled. Nothing was sent: no transaction reached Stellar."
         : `Cancelled. Nothing was burned on ${chainName(from)}. If you had already approved, the approval stays and covers exactly this amount; the next attempt reuses it.`,
-    );
+      maybeSent: false,
+      raw: "Cancelled by user",
+    });
   }, [isStellar, from]);
 
   const send = useCallback(async () => {
@@ -285,7 +289,11 @@ export function NearIntentsClient() {
       remember(t);
       setTracked(t);
     } catch (e) {
-      if (live()) setSendError(reportError("The transfer", e));
+      if (live()) {
+        const classified = classifyWalletError(e);
+        reportError("The transfer", classified.raw);
+        setSendError(classified);
+      }
     } finally {
       if (live()) setStep("idle");
     }
@@ -500,11 +508,24 @@ export function NearIntentsClient() {
                   </button>
                 </div>
               )}
-              {sendError && (
-                <Notice tone="alarm" title="The transfer stopped">
-                  {sendError}
-                </Notice>
-              )}
+              {sendError &&
+                (sendError.kind === "declined" || sendError.kind === "popup" ? (
+                  <Notice tone="info" title="Wallet request cancelled">
+                    {sendError.message}
+                  </Notice>
+                ) : sendError.maybeSent ? (
+                  <Notice tone="alarm" title="Could not confirm transfer">
+                    <p>{sendError.message}</p>
+                    <p className="mt-2 text-bone/35">
+                      Check your wallet&apos;s activity before retrying. Full detail is in the
+                      browser console under <code className="font-mono">[xebra]</code>.
+                    </p>
+                  </Notice>
+                ) : (
+                  <Notice tone="alarm" title="The transfer stopped">
+                    {sendError.message}
+                  </Notice>
+                ))}
             </div>
           </GlassCard>
 
