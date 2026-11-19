@@ -43,6 +43,7 @@ import {
   routeDestination,
 } from "../../lib/route-destination";
 import { type RecipientResolution, resolveRecipient } from "../../lib/solana-recipient";
+import { type ClassifiedError, classifyWalletError } from "../../lib/wallet-error";
 import { Button } from "../ui/button";
 import { Field, Input } from "../ui/field";
 import { ArrowRight } from "../ui/icons";
@@ -167,7 +168,7 @@ export function EvmBridgeForm({
   const [submitting, setSubmitting] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [step, setStep] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<ClassifiedError | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   // What the receipt describes, fixed at signing so nothing chosen afterwards can rewrite it.
   const [sent, setSent] = useState<Sent | null>(null);
@@ -417,7 +418,9 @@ export function EvmBridgeForm({
     try {
       await ensureChain(provider, source);
     } catch (err) {
-      setSubmitError(reportError("network switch failed", err));
+      const classified = classifyWalletError(err);
+      reportError("network switch failed", classified.raw);
+      setSubmitError(classified);
     } finally {
       // Asked whatever happened: a wallet that switched without announcing it is still on the
       // right chain, and one that announced without switching is not.
@@ -488,7 +491,7 @@ export function EvmBridgeForm({
       // committed, because this is the last moment declining costs nothing.
       const priced = await priceNow();
       if (typeof priced === "string") {
-        setSubmitError(`${priced} Nothing was sent.`);
+        setSubmitError(classifyWalletError(`${priced} Nothing was sent.`));
         return;
       }
       // Circle's fee drifts by a few percent over minutes. If the total went up, stop and show it
@@ -496,7 +499,9 @@ export function EvmBridgeForm({
       // often absorbed by Xebra's own fee, and then the total, which is what the user saw, holds.
       if (priced.fee > plan.fee) {
         setSubmitError(
-          `The fee moved while you were reviewing: it is now ${formatUsdc6(priced.fee)} USDC, was ${formatUsdc6(plan.fee)}. Nothing was sent. Check the new total and confirm again.`,
+          classifyWalletError(
+            `The fee moved while you were reviewing: it is now ${formatUsdc6(priced.fee)} USDC, was ${formatUsdc6(plan.fee)}. Nothing was sent. Check the new total and confirm again.`,
+          ),
         );
         return;
       }
@@ -542,7 +547,9 @@ export function EvmBridgeForm({
         })
         .catch(() => undefined);
     } catch (err) {
-      setSubmitError(reportError("transfer failed", err));
+      const classified = classifyWalletError(err);
+      reportError("transfer failed", classified.raw);
+      setSubmitError(classified);
     } finally {
       setSubmitting(false);
       setStep(null);
@@ -758,18 +765,29 @@ export function EvmBridgeForm({
           </Notice>
         )}
 
-        {submitError && (
-          <Notice tone="alarm" title="The transfer did not go through" className="mt-5">
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.75rem] leading-relaxed text-bone/60">
-              {submitError}
-            </pre>
-            <p className="mt-2 text-bone/35">
-              Nothing is burned unless a transaction hash is shown below. An approval, if you made
-              one, stays in place and moves no money. Full detail is in the browser console under{" "}
-              <code className="font-mono">[xebra]</code>.
-            </p>
-          </Notice>
-        )}
+        {submitError &&
+          (submitError.kind === "declined" || submitError.kind === "popup" ? (
+            <Notice tone="info" title="Wallet request cancelled" className="mt-5">
+              You cancelled in your wallet. Nothing was sent.
+            </Notice>
+          ) : submitError.maybeSent ? (
+            <Notice tone="alarm" title="Could not confirm transfer" className="mt-5">
+              <p>{submitError.message}</p>
+              <p className="mt-2 text-bone/35">
+                Check your wallet&apos;s activity before retrying. Full detail is in the browser
+                console under <code className="font-mono">[xebra]</code>.
+              </p>
+            </Notice>
+          ) : (
+            <Notice tone="alarm" title="The transfer did not go through" className="mt-5">
+              <p>{submitError.message}</p>
+              <p className="mt-2 text-bone/35">
+                Nothing is burned unless a transaction hash is shown below. An approval, if you made
+                one, stays in place and moves no money. Full detail is in the browser console under{" "}
+                <code className="font-mono">[xebra]</code>.
+              </p>
+            </Notice>
+          ))}
 
         {!txHash && health?.status === "down" && (
           <Notice
