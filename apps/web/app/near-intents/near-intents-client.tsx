@@ -269,9 +269,22 @@ export function NearIntentsClient() {
       if (!live()) return;
       console.info("[xebra] near-intents: deposit address", prepared.depositAddress);
 
+      const onBurn = (hash: string) => {
+        const t: Tracked = {
+          from,
+          depositAddress: prepared.depositAddress,
+          tx: hash,
+          hub: prepared.hub,
+          expectOut: prepared.intents.amountOutFormatted,
+          symbol: destination.symbol,
+        };
+        remember(t);
+        setTracked(t);
+      };
+
       const txHash = isStellar
         ? await signOnStellar(prepared.build.steps, live)
-        : await signOnEvm(prepared.build.steps, live);
+        : await signOnEvm(prepared.build.steps, live, onBurn);
       if (!txHash || !live()) return;
       console.info("[xebra] near-intents: submitted", txHash);
       const t: Tracked = {
@@ -319,7 +332,11 @@ export function NearIntentsClient() {
      * An exact-amount approval (when the allowance is short) and the burn, on the source chain, in
      * order, each confirmed before the next. Returns the burn's hash.
      */
-    async function signOnEvm(steps: { id: string; tx: UnsignedTx }[], live: () => boolean) {
+    async function signOnEvm(
+      steps: { id: string; tx: UnsignedTx }[],
+      live: () => boolean,
+      onBurn?: (hash: string) => void,
+    ) {
       const provider = connections.evm?.provider;
       if (from === "stellar" || !provider || !sender) throw new Error("Connect an EVM wallet.");
       const chain = EVM_CHAINS[from];
@@ -346,14 +363,35 @@ export function NearIntentsClient() {
           data: s.tx.data as `0x${string}`,
           chainId: chain.chainId,
         });
-        setStep("submitting");
-        const result = await waitForReceipt(provider, hash, { timeoutMs: 180_000 });
-        if (result !== "success") {
-          throw new Error(
-            `${s.id === "approve" ? "The approval" : "The burn"} reverted on ${chain.name}: ${explorerTxUrl(chain, hash)}`,
-          );
+        if (s.id === "burn") {
+          burn = hash;
+          // Save the tracked transfer as soon as the burn hash exists, before waiting for the receipt.
+          onBurn?.(hash);
         }
-        if (s.id === "burn") burn = hash;
+        setStep("submitting");
+        try {
+          const result = await waitForReceipt(provider, hash, { timeoutMs: 180_000 });
+          if (result !== "success") {
+            if (s.id === "burn") {
+              remember(null);
+              setTracked(null);
+            }
+            throw new Error(
+              `${s.id === "approve" ? "The approval" : "The burn"} reverted on ${chain.name}: ${explorerTxUrl(chain, hash)}`,
+            );
+          }
+        } catch (waitErr) {
+          const message = waitErr instanceof Error ? waitErr.message : String(waitErr);
+          if (s.id === "burn" && /no receipt|timeout/i.test(message)) {
+            // A receipt timeout is "still confirming", not a failure: keep tracking.
+            console.warn(
+              "[xebra] near-intents: burn receipt wait timed out, still confirming",
+              hash,
+            );
+            return hash;
+          }
+          throw waitErr;
+        }
       }
       return burn;
     }
